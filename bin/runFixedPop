@@ -23,6 +23,7 @@ import time
 from time import sleep
 import string
 import os.path
+import json
 
 import numpy as np
 import scipy.special as ss
@@ -32,8 +33,7 @@ import pandas as pd
 from cosmic.sample.initialbinarytable import InitialBinaryTable
 from cosmic import Match
 from cosmic.evolve import Evolve
-from cosmic.utils import mass_min_max_select
-from cosmic.utils import param_transform
+from cosmic.utils import param_transform, filter_bpp_bcm, bcm_conv_select
 
 ###############################################################################
 # DEFINE COMMANDLINE ARGUMENTS
@@ -55,7 +55,7 @@ def parse_commandline():
                         required=True, type=int, nargs='+')
     parser.add_argument("--convergence-params",
                         help="A space separated list of parameters you would "
-                        "like to varify you have simulated enough binaries for"
+                        "like to verify have converged to a single distribution shape"
                         , nargs='+',
                         default=['mass_1', 'mass_2', 'porb', 'ecc'])
     parser.add_argument("--initial_samp",
@@ -68,10 +68,6 @@ def parse_commandline():
                         "Bulge ThinDisk and ThickDisk", required=True)
     parser.add_argument("--metallicity", help="Metallicity of the population; "
                         "default: 0.02 (solar)", default=0.02, type=float)
-    parser.add_argument("--porb_cut",
-                        help="Specify an orbital period cut "
-                        "in log10(sec); default: 12",
-                        type=float, default=12.0)
     parser.add_argument("--Niter",
                         help="Number of iterations of binaries "
                         "to try, will check ever Nstep for convergence",
@@ -115,8 +111,6 @@ if __name__ == '__main__':
     ###########################################################################
     args = parse_commandline()
 
-
-
     # SET TIME TO TRACK COMPUTATION TIME
     ###########################################################################
     start_time = time.time()
@@ -143,74 +137,31 @@ if __name__ == '__main__':
     cp.optionxform = str
     cp.read(args.inifile)
 
-    # ---- Read needed variables from [bse] section.
-    # -- bse
-    neta = cp.getfloat('bse', 'neta')
-    bwind = cp.getfloat('bse', 'bwind')
-    hewind = cp.getfloat('bse', 'hewind')
-    alpha1 = cp.getfloat('bse', 'alpha1')
-    lambdaf = cp.getfloat('bse', 'lambdaf')
-    ceflag = cp.getint('bse', 'ceflag')
-    tflag = cp.getint('bse', 'tflag')
-    ifflag = cp.getint('bse', 'ifflag')
-    wdflag = cp.getint('bse', 'wdflag')
-    ppsn = cp.getint('bse', 'ppsn')
-    bhflag = cp.getint('bse', 'bhflag')
-    nsflag = cp.getint('bse', 'nsflag')
-    mxns = cp.getfloat('bse', 'mxns')
-    pts1 = cp.getfloat('bse', 'pts1')
-    pts2 = cp.getfloat('bse', 'pts2')
-    pts3 = cp.getfloat('bse', 'pts3')
-    sigma = cp.getfloat('bse', 'sigma')
-    beta = cp.getfloat('bse', 'beta')
-    xi = cp.getfloat('bse', 'xi')
-    acc2 = cp.getfloat('bse', 'acc2')
-    epsnov = cp.getfloat('bse', 'epsnov')
-    eddfac = cp.getfloat('bse', 'eddfac')
-    gamma = cp.getfloat('bse', 'gamma')
-    bconst = cp.getint('bse', 'bconst')
-    CK = cp.getint('bse', 'CK')
-    merger = cp.getint('bse', 'merger')
-    windflag = cp.getint('bse', 'windflag')
+    # ---- Read needed variables from the inifile
+    dictionary = {}
+    for section in cp.sections():
+        dictionary[section] = {}
+        for option in cp.options(section):
+            opt = cp.get(section, option)
+            if opt == 'False':
+                opt = False
+            elif opt == 'True':
+                opt = True
+            try:
+                dictionary[section][option] = json.loads(opt)
+            except:
+                dictionary[section][option] = opt
 
-    # ---- Read needed variables from [rand_seed] section.
-    # -- rand_seed
-    seed_int = cp.getint('rand_seed', 'seed')
+    BSEDict = dictionary['bse']
+    seed_int = int(dictionary['rand_seed']['seed'])
+    filters = dictionary['filters']
+    filters['merger_type'] = [str(i).zfill(4) for i in filters['merger_type']]
+    convergence = dictionary['convergence']
+
     if seed_int != 0:
         np.random.seed(seed_int)
     else:
-        np.random.seed()
-
-
-    # Make dictionary of all BSE parameters for readablility reasons
-    BSEDict = {}
-    BSEDict['neta'] = neta
-    BSEDict['bwind'] = bwind
-    BSEDict['hewind'] = hewind
-    BSEDict['alpha1'] = alpha1
-    BSEDict['lambdaf'] = lambdaf
-    BSEDict['ceflag'] = ceflag
-    BSEDict['tflag'] = tflag
-    BSEDict['ifflag'] = ifflag
-    BSEDict['wdflag'] = wdflag
-    BSEDict['ppsn'] = ppsn
-    BSEDict['bhflag'] = bhflag        
-    BSEDict['nsflag'] = nsflag
-    BSEDict['mxns'] = mxns
-    BSEDict['pts1'] = pts1
-    BSEDict['pts2'] = pts2
-    BSEDict['pts3'] = pts3
-    BSEDict['sigma'] = sigma
-    BSEDict['beta'] = beta
-    BSEDict['xi'] = xi
-    BSEDict['acc2'] = acc2
-    BSEDict['epsnov'] = epsnov
-    BSEDict['eddfac'] = eddfac
-    BSEDict['gamma'] = gamma
-    BSEDict['bconst'] = bconst
-    BSEDict['CK'] = CK
-    BSEDict['merger'] = merger
-    BSEDict['windflag'] = windflag
+        np.random.seed(0)
 
     # Set up final_kstar1 and final_kstar2 strings for saved data files
     if len(args.final_kstar1) == 2: 
@@ -236,7 +187,7 @@ if __name__ == '__main__':
         bpp_save = pd.read_hdf(dat_store, 'bpp')
         total_mass = pd.read_hdf(dat_store, 'totalMass')[0][0]
         total_sampled_mass = np.max(total_mass)
-        idx = np.max(pd.read_hdf(dat_store, 'idx'))[0]
+        idx = int(np.max(pd.read_hdf(dat_store, 'idx'))[0])
     except:
         bcm_save = pd.DataFrame()
         bpp_save = pd.DataFrame()
@@ -245,38 +196,32 @@ if __name__ == '__main__':
         idx = 0
         log_file = open('log_'+args.galaxy_component+'_'+kstar1_range_string+'_'+kstar2_range_string+'.txt', 'w')
 
-    # BRUTE FORCE REQUIRE LOTS OF SHORT PERIOD BINARIES
-    ####################################################
-    bcm_len = 0
-    porb_short = np.log10(100000.0)
-    bcm_short_length_required = 1000
-    ####################################################
-
     match_all = np.zeros(len(args.convergence_params))
     Nstep = args.Nstep
 
     match_list = []
 
+    # Select the Galactic component from user input
+    if args.galaxy_component == 'ThinDisk':
+        SFH_model='const'
+        component_age=10000.0
+    elif args.galaxy_component == 'Bulge':
+        SFH_model='burst'
+        component_age=10000.0
+    elif args.galaxy_component == 'ThickDisk':
+        SFH_model='burst'
+        component_age=11000.0
+    elif args.galaxy_component == 'DeltaBurst':
+        SFH_model='delta_burst'
+        component_age=13700.0
+    elif args.galaxy_component == 'FIRE':
+        SFH_model='FIRE'
+        component_age=13900.0
+
     # Simulate the fixed population 
     # This process is illustrated in Fig 1 of Breivik & Larson (2018)
-    while (Nstep < args.Niter) & (np.min(np.array(match_all)) < 0.999999) or (bcm_len < bcm_short_length_required):
-        # Select the Galactic component from user input
-        if args.galaxy_component == 'ThinDisk':
-            SFH_model='const'
-            component_age=10000.0
-        elif args.galaxy_component == 'Bulge':
-            SFH_model='burst'
-            component_age=10000.0
-        elif args.galaxy_component == 'ThickDisk':
-            SFH_model='burst'
-            component_age=11000.0
-        elif args.galaxy_component == 'DeltaBurst':
-            SFH_model='delta_burst'
-            component_age=13700.0
-        elif args.galaxy_component == 'FIRE':
-            SFH_model='FIRE'
-            component_age=13900.0
-        
+    steps = 0
+    while (Nstep < args.Niter) & (np.min(np.array(match_all)) > -6):
         # Select the initial binary sample method from user input
         if args.initial_samp == 'independent':
             IBT, sampled_mass, n_samp = InitialBinaryTable.sampler(args.initial_samp, kstar1_range, kstar2_range, 'kroupa93', 'thermal', SFH_model, component_age, args.metallicity, args.Nstep)
@@ -294,70 +239,68 @@ if __name__ == '__main__':
 
         # Now that we have all these initial conditions 
         # let's create an Evolve class and evolve these systems
-        bpp, bcm, initCond = Evolve.evolve(initialbinarytable=IBT, BSEDict=BSEDict, nproc=args.nproc, idx=idx)
+        # see if users specified a smaple rate for the bcm array if not set it
+        # tphysf
+        try:
+            dtp = dictionary['bse']['dtp']
+        except:
+            dtp = IBT['tphysf'].values
 
-        # Convert the orbital period from years to seconds
+        bpp, bcm, initCond = Evolve.evolve(initialbinarytable=IBT, BSEDict=BSEDict, nproc=args.nproc, idx=idx, dtp=dtp)
+
+        # Convert the orbital period from years to log seconds
         bcm['porb'] = np.log10(bcm['porb']*sec_in_year)
         
         # Keep track of the index
-        idx = bcm.bin_num.max()+1
+        idx = int(bcm.bin_num.max()+1)
         dat_store.append('idx', pd.DataFrame([idx]))
 
-        # Filter out any binaries that have has mass transfer from a WD onto a compact object
-        idx_MT = bpp.loc[(bpp.kstar_1.isin([10,11,12,13,14])) &(bpp.kstar_2.isin([10,11,12])) &
-                         (bpp.evol_type == 3.0)].bin_num
-        bcm = bcm.loc[~bcm.bin_num.isin(idx_MT)]
+        # Filter the bcm and bpp arrays according to user specified filters
+        bcm = filter_bpp_bcm(bcm, bpp, filters)
         
-        # Select the state of the binary today and filter out 
-        # any disrupted binaries
-        bcm_filtered = bcm.loc[bcm.tphys > 1.0]
-        bcm_filtered = bcm_filtered.loc[bcm_filtered.sep > 0.0]
-        bcm_filtered = bcm_filtered.loc[bcm_filtered.porb < args.porb_cut]
-        # Filter out long period binaries and systems that don't match final kstars supplied
-        bcm_save_filtered = bcm_filtered.loc[(bcm_filtered.kstar_1.isin(kstar1_range)) & (bcm_filtered.kstar_2.isin(kstar2_range))]
+        # Filter out systems that don't match final kstars supplied
+        bcm_save_filtered = bcm.loc[(bcm.kstar_1.isin(kstar1_range)) & (bcm.kstar_2.isin(kstar2_range))]
+        
         # Run the match on short period binaries, such that we get a better sampling
         # for the highest signal systems
-        if bcm_save_filtered.shape[0] > 0:
+        if (len(bcm_save_filtered) > 0):
             # Save the bcm dataframe
             dat_store.append('bcm', bcm_save_filtered)
             bcm_save = bcm_save.append(bcm_save_filtered)
-            bcm_short = bcm_save.loc[bcm_save.porb < porb_short]
-            bcm_len = bcm_short.shape[0]
-            if idx <= args.Nstep:
-                bcm_save_test_conv1 = bcm_save.iloc[0:int(bcm_save.shape[0]/2.0)]
-            else:
-                bcm_save_test_conv1 = bcm_save.iloc[:bcm_save.shape[0]-bcm_save_filtered.shape[0]]
-        
+           
             idxSave = bcm_save_filtered.bin_num
             bpp_save_filtered = bpp[bpp.bin_num.isin(idxSave)]
-            
+
             # Save the bpp dataframe
             dat_store.append('bpp', bpp_save_filtered)
             bpp_save = bpp_save.append(bpp_save_filtered)
-            
+
             # Now let's select out the initial binaries that produce our data
             initC = initCond.loc[initCond.bin_num.isin(idxSave)]
 
             # Save the initial binaries 
             dat_store.append('initCond', initC)
 
+            bcm_conv_1, bcm_conv_2 = bcm_conv_select(bcm_save, bcm_save_filtered, convergence) 
+
             # Perform the Match calculations for all interested parameters
             # supplied by user in conv_params
-            if bcm_save_test_conv1.shape[0] > 3:
+            if len(bcm_conv_2) > 3:
                 match_all = []
-                for i_convergence_parameter in args.convergence_params:
-                    if bcm_save[i_convergence_parameter].all() == 0.0:
+                for conv_param in args.convergence_params:
+                    if bcm_conv_1[conv_param].all() == 0.0:
                         match_all.append(np.array([1.0]))
                     else:
-                        match, binwidth = Match.match([param_transform(bcm_save[i_convergence_parameter]).tolist(),\
-                                                      param_transform(bcm_save_test_conv1[i_convergence_parameter]).tolist()], 2)
+                        match, bw = Match.match([param_transform(bcm_conv_1[conv_param]).tolist(),\
+                                                 param_transform(bcm_conv_2[conv_param]).tolist()])
                         match_all.append(match)
+
                 match_all = np.array(match_all)
                 log_file.write('matches: {0}\n'.format(np.array(match_all)))
                 log_file.write('Length of bcm array: {0}\n'.format(len(bcm_save)))
-                log_file.write('Number of binaries with orbital period shorter than {0} seconds: {1}\n'.format(10**porb_short, bcm_len))
-                match_save = pd.DataFrame(np.array(match_all).T, columns = args.convergence_params)
+                match_save = pd.DataFrame(np.atleast_2d(match_all), columns = args.convergence_params)
                 dat_store.append('match', match_save)
+
             # save the total_sampled_mass so far
             dat_store.append('totalMass', pd.DataFrame([total_sampled_mass]))
 
